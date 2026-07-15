@@ -1,20 +1,22 @@
 import { useState } from 'react'
 import './App.css'
-import { SignedIn, SignedOut, SignInButton, SignUpButton, UserButton } from '@clerk/clerk-react'
+import { Show, SignInButton, SignUpButton, UserButton } from '@clerk/react'
 
 function App() {
   const [count, setCount] = useState(0)
 
   return (
-    <div >
+    <div>
       <h1>My Chat App</h1>
-      <SignedOut>
+      <Show when="signed-out">
         <SignInButton mode="modal" />
-        <SignUpButton mode="modal" />
-      </SignedOut>
-      <SignedIn>
+        <SignUpButton mode="modal">
+          <button style={{ marginLeft: '8px' }}>Sign up</button>
+        </SignUpButton>
+      </Show>
+      <Show when="signed-in">
         <UserButton />
-      </SignedIn>
+      </Show>
     </div>
   )
 }
