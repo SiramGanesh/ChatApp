@@ -7,7 +7,7 @@ import { clerkMiddleware } from "@clerk/express";
 import cors from "cors";
 import fs from "fs";
 import path from "path";
-import job from './lib/job.js';
+import job from './lib/cron.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
