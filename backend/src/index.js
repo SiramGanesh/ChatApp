@@ -1,11 +1,23 @@
+import './lib/dns.js'; // must be first: fixes SRV lookup on Windows
 import express from 'express';
 import "dotenv/config.js";
+import User from './models/user.model.js';
+import {connectDB} from './lib/db.js';
+import { clerkMiddleware } from "@clerk/express";
+import cors from "cors";
 
 const app = express();
-const PORT = process.env.PORT;
-
+const PORT = process.env.PORT || 3000;
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+app.use(cors({ origin: FRONTEND_URL, credentials: true }));
+app.use(clerkMiddleware());
 app.use(express.json());
 
+app.get("/health", (req, res) => {
+  res.status(200).json({ ok: true });
+});
+
 app.listen(PORT, () => {
+  connectDB();
   console.log(`Server is running on port ${PORT}`);
 });
