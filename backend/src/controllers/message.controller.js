@@ -68,7 +68,7 @@ export async function getMessages(req, res) {
 
 export async function sendMessage(req, res) {
   try {
-    const { text } = req.body;
+    const { text, clientId } = req.body;
     const { id: receiverId } = req.params;
     const senderId = req.user._id;
 
@@ -92,6 +92,10 @@ export async function sendMessage(req, res) {
       image: imageUrl,
       video: videoUrl,
     });
+    // Echo the client-generated id (text sends only) so the sender's optimistic
+    // placeholder can be reconciled against this authoritative message
+    // (HTTP response + socket echo).
+    if (clientId) newMessage.clientId = clientId;
 
     await newMessage.save();
 
@@ -99,6 +103,16 @@ export async function sendMessage(req, res) {
     // only send the message in realtime if user is online
     if (receiverSocketId) {
       io.to(receiverSocketId).emit("newMessage", newMessage);
+    }
+
+    // Also echo to the sender's own socket(s) so the sender's other tabs / devices
+    // stay in sync without waiting on the HTTP response. The sender's active tab
+    // uses the HTTP response to reconcile the optimistic placeholder; the socket
+    // echo here is what keeps additional tabs up to date and lets the dedupe path
+    // be a no-op when both arrive in the same tab.
+    const senderSocketId = getReceiverSocketId(senderId);
+    if (senderSocketId && senderSocketId !== receiverSocketId) {
+      io.to(senderSocketId).emit("newMessage", newMessage);
     }
 
     res.status(201).json(newMessage);

@@ -19,6 +19,10 @@ const messageSchema = new mongoose.Schema({
     },video: {
         type: String,
     },
+    clientId: {
+        type: String,
+        required: false,
+    },
 },
     {timestamps: true}
 );

@@ -5,6 +5,15 @@ import { axiosInstance } from "../lib/axios";
 import { useAuthStore } from "./useAuthStore";
 import toast from "react-hot-toast";
 
+// Generates a unique id for an optimistic outgoing message. Used to match the
+// placeholder in local state against the authoritative server response.
+function newClientId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `c_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export const useChatStore = create(
   persist(
     (set, get) => ({
@@ -65,18 +74,82 @@ export const useChatStore = create(
         }
       },
 
-      sendMessage: async (messageData) => {
-        const { selectedUser, messages } = get();
-        if (!selectedUser) return false;
+      // Text only: optimistic insert with a clientId so the bubble appears
+      // instantly. The HTTP response (or the sender's socket echo) reconciles
+      // the placeholder by clientId.
+      sendTextMessage: async (conversationId) => {
+        const { selectedUser, messages, composerText } = get();
+        const messageText = composerText.trim();
+        if (!conversationId || !messageText || !selectedUser) return false;
+
+        const clientId = newClientId();
+        const authUser = useAuthStore.getState().authUser;
+        const optimistic = {
+          _id: clientId,
+          clientId,
+          senderId: authUser?._id,
+          receiverId: selectedUser._id,
+          text: messageText,
+          image: undefined,
+          video: undefined,
+          createdAt: new Date().toISOString(),
+          pending: true,
+        };
+
+        set({ messages: [...messages, optimistic] });
 
         try {
-          const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, messageData);
-          set({ messages: [...messages, res.data], composerText: "" });
+          const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, {
+            text: messageText,
+            clientId,
+          });
+          set((state) => ({
+            messages: state.messages.map((m) => (m.clientId === clientId ? res.data : m)),
+            composerText: "",
+          }));
+          get().getConversations();
+          return true;
+        } catch (error) {
+          set((state) => ({
+            messages: state.messages.filter((m) => m.clientId !== clientId),
+            // Restore the draft so the user can retry.
+            composerText: messageText,
+          }));
+          toast.error(error.response?.data?.message || "Failed to send message");
+          return false;
+        }
+      },
+
+      // Media: do NOT optimistic-insert. The user only sees the bubble after
+      // the upload finishes (the composer shows an "Uploading media…" loader
+      // while it runs). Append the server response directly. The server
+      // echoes to the sender's own socket as a safety net (idempotent via
+      // _id dedupe in subscribeToMessages).
+      sendMediaMessage: async ({ conversationId, file }) => {
+        if (!conversationId || !file) return false;
+        const { selectedUser } = get();
+        if (!selectedUser) return false;
+
+        const formData = new FormData();
+        formData.append("media", file);
+
+        set({ isSendingMedia: true });
+        try {
+          const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, formData);
+          set((state) => {
+            const existsById = state.messages.some(
+              (m) => m._id && m._id === res.data._id,
+            );
+            if (existsById) return state;
+            return { messages: [...state.messages, res.data] };
+          });
           get().getConversations();
           return true;
         } catch (error) {
           toast.error(error.response?.data?.message || "Failed to send message");
           return false;
+        } finally {
+          set({ isSendingMedia: false });
         }
       },
 
@@ -88,12 +161,45 @@ export const useChatStore = create(
 
         socket.off("newMessage");
         socket.on("newMessage", (newMessage) => {
-          // if im not the receiver don't do anything just return
-          if (String(newMessage.senderId) !== String(userId)) return;
+          // Only react to messages on this thread. (senderId, receiverId) must
+          // match the active conversation in either direction.
+          const isForThisThread =
+            (String(newMessage.senderId) === String(userId) &&
+              String(newMessage.receiverId) === String(useAuthStore.getState().authUser?._id)) ||
+            (String(newMessage.receiverId) === String(userId) &&
+              String(newMessage.senderId) === String(useAuthStore.getState().authUser?._id));
+          if (!isForThisThread) return;
 
-          set({ messages: [...get().messages, newMessage] });
+          set((state) => {
+            // 1. If the optimistic placeholder for this clientId is still in the
+            //    list, replace it in place (this is what the sender's own tab
+            //    sees when the socket echo arrives).
+            if (newMessage.clientId) {
+              const hasOptimistic = state.messages.some(
+                (m) => m.clientId === newMessage.clientId,
+              );
+              if (hasOptimistic) {
+                return {
+                  messages: state.messages.map((m) =>
+                    m.clientId === newMessage.clientId ? newMessage : m,
+                  ),
+                };
+              }
+            }
+            // 2. Otherwise, dedupe by _id (e.g. a new receiver) and append.
+            const existsById = state.messages.some(
+              (m) => m._id && m._id === newMessage._id,
+            );
+            if (existsById) return state;
+            return { messages: [...state.messages, newMessage] };
+          });
 
-          get().getConversations();
+          // Refresh the conversation list only when the incoming message isn't
+          // our own (our own message already triggered a getConversations
+          // refresh in sendMessage; calling it again is harmless but redundant).
+          if (String(newMessage.senderId) !== String(useAuthStore.getState().authUser?._id)) {
+            get().getConversations();
+          }
         });
       },
 
@@ -119,27 +225,6 @@ export const useChatStore = create(
       setSidebarTab: (sidebarTab) => set({ sidebarTab }),
       setComposerText: (composerText) => set({ composerText }),
       setSoundEnabled: (isSoundEnabled) => set({ isSoundEnabled }),
-
-      sendTextMessage: async (conversationId) => {
-        const messageText = get().composerText.trim();
-        if (!conversationId || !messageText) return false;
-
-        return get().sendMessage({ text: messageText });
-      },
-
-      sendMediaMessage: async ({ conversationId, file }) => {
-        if (!conversationId || !file) return false;
-
-        const formData = new FormData();
-        formData.append("media", file);
-
-        set({ isSendingMedia: true });
-        try {
-          return await get().sendMessage(formData);
-        } finally {
-          set({ isSendingMedia: false });
-        }
-      },
     }),
     {
       name: "imessage-storage",
